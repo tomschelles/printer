@@ -1,0 +1,512 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <meta charset="utf-8" />
+    <title>Printer intune app</title>
+    <script src="https://filedn.com/lEfvjNNbY2ApJN8edxDHMGJ/static/js/jquery-3.7.1.min.js"></script>
+
+    <script>
+        // Globale waarden
+        let school = "";
+        let locatie = "";
+        let printer = "";
+        let ip = "192.168.0.50";
+        let driver = "";
+        let file = "";
+        let driverDate = "";
+
+        const drivers = [
+            { date: "12/12/2025", name: "Ricoh IMC6010", driver: "RICOH IM C3000 PCL 6", file: "drivers\\Ricoh\\oemsetup.inf" },
+            { date: "12/12/2025", name: "Canon C5850", driver: "Canon Generic Plus PCL6", file: "drivers\\Canon\\CNP60MA64.inf" },
+            { date: "12/12/2025", name: "Kyocera TASKalfa 5053ci KX", driver: "Kyocera TASKalfa 5053ci KX", file: "drivers\\Kyocera\\OEMSETUP.inf" },
+            { date: "12/12/2025", name: "Kyocera TASKalfa 3253ci KX", driver: "Kyocera TASKalfa 3253ci KX", file: "drivers\\Kyocera\\OEMSETUP.inf" },
+        ];
+
+        const baseImgUrl = "https://filedn.com/lEfvjNNbY2ApJN8edxDHMGJ/static/img/kobaz.be/";
+
+        // Mapping school -> logo URL
+        // (Sint-Hubertus stond niet in je lijst, dus die blijft leeg)
+        const schoolLogos = {
+            "KOBA Zuiderkempen": baseImgUrl + "zuiderkempen_small.png",
+            "De Droomgaard": baseImgUrl + "vbsdedroomgaard.png",
+            "de KaBaZ": baseImgUrl + "vbsdekabaz.png",
+            "De Klimmuur": baseImgUrl + "vbsdeklimmuur.png",
+            "De Knipoog": baseImgUrl + "vbsdeknipoog.png",
+            "De Leeroase": baseImgUrl + "vbsdeleeroase.png",
+            "De Regenboog": baseImgUrl + "vbsderegenboog.png",
+            "De Wegwijzer": baseImgUrl + "vbsdewegwijzer.png",
+            "De Wijngaard ": baseImgUrl + "vbsdewijngaard.png", // let op: in jouw dropdown zit een spatie op het einde
+            "Groot-Vorst": baseImgUrl + "vbsgrootvorst.png",
+            "Meerlaar": baseImgUrl + "vbsmeerlaar.png",
+            "Sint-Hubertus": "",
+            "'t Klavertje": baseImgUrl + "vbsklavertje.png",
+            "Toermalijn": baseImgUrl + "toermalijnolen.png",
+            "Top@punt": baseImgUrl + "vbstoppunt.png",
+            "De Luchtballon": baseImgUrl + "luchtballon.png",
+        };
+
+        function getSelectedText(selectId) {
+            const sel = document.getElementById(selectId);
+            return sel?.options?.[sel.selectedIndex]?.text?.trim() ?? "";
+        }
+
+        function resolveDriver(printerName) {
+            const match = drivers.find(d => d.name === printerName);
+            return {
+                driver: match?.driver ?? "",
+                file: match?.file ?? "",
+                date: match?.date ?? ""
+            };
+        }
+
+        // Printer icoon als inline svg
+        const printerSvg = `data:image/svg+xml;utf8,${encodeURIComponent(`
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M6 9V2h12v7"/>
+  <path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/>
+  <path d="M6 14h12v8H6z"/>
+</svg>
+`)}`;
+
+        // Image loader met CORS retry
+        function loadImage(src, useCORS = true) {
+            return new Promise((resolve, reject) => {
+                const img = new Image();
+                img.crossOrigin = "anonymous";
+
+                // crossOrigin heeft geen zin bij data: en kan soms zelfs storen
+                if (useCORS && !src.startsWith("data:")) img.crossOrigin = "anonymous";
+
+                img.onload = () => resolve(img);
+                img.onerror = () => reject(new Error("Image load failed: " + src));
+
+                // cache-buster alleen bij http(s), NIET bij data:
+                if (src.startsWith("data:")) {
+                    img.src = src;
+                } else {
+                    img.src = src + (src.includes("?") ? "&" : "?") + "v=" + Date.now();
+                }
+            });
+        }
+
+
+        async function loadImageWithFallback(src) {
+            try {
+                return await loadImage(src, true);
+            } catch (e1) {
+                // fallback zonder CORS (canvas export kan dan mislukken, tekenen meestal wel)
+                return await loadImage(src, false);
+            }
+        }
+
+        function fitText(ctx, text, maxWidth, startFontPx, minFontPx, fontFamily = "Courier New", weight = "bold") {
+            let size = startFontPx;
+            while (size > minFontPx) {
+                ctx.font = `${weight} ${size}px ${fontFamily}`;
+                if (ctx.measureText(text).width <= maxWidth) break;
+                size--;
+            }
+            return size;
+        }
+
+        async function renderPreviewImage() {
+            const canvas = document.getElementById("previewCanvas");
+            if (!canvas) return;
+            const ctx = canvas.getContext("2d");
+
+            const W = canvas.width;   // 256
+            const H = canvas.height;  // 256
+
+            ctx.clearRect(0, 0, W, H);
+
+            // ---------- helpers ----------
+            function roundRectPath(x, y, w, h, r) {
+                const rr = Math.min(r, w / 2, h / 2);
+                ctx.beginPath();
+                ctx.moveTo(x + rr, y);
+                ctx.arcTo(x + w, y, x + w, y + h, rr);
+                ctx.arcTo(x + w, y + h, x, y + h, rr);
+                ctx.arcTo(x, y + h, x, y, rr);
+                ctx.arcTo(x, y, x + w, y, rr);
+                ctx.closePath();
+            }
+
+            function setFont(px, weight = "normal") {
+                ctx.font = `${weight} ${px}px Courier New`;
+            }
+
+            function fitFontToWidth(text, maxWidth, startPx, minPx, weight = "bold") {
+                let px = startPx;
+                while (px > minPx) {
+                    setFont(px, weight);
+                    if (ctx.measureText(text).width <= maxWidth) break;
+                    px--;
+                }
+                return px;
+            }
+
+            // Wrap naar max 2 regels (mooier voor lange schoolnamen)
+            function wrapTwoLines(text, maxWidth, startPx, minPx, weight = "bold") {
+                const clean = (text || "").trim();
+                if (!clean) return { lines: [""], px: startPx };
+
+                // probeer eerst 1 regel met fitted font
+                let px = fitFontToWidth(clean, maxWidth, startPx, minPx, weight);
+                setFont(px, weight);
+                if (ctx.measureText(clean).width <= maxWidth) return { lines: [clean], px };
+
+                // anders: split op spaties en zoek beste breuk
+                const words = clean.split(/\s+/);
+                let best = null;
+
+                // vaste font (iets kleiner) voor 2 regels
+                px = Math.max(minPx, startPx - 2);
+                setFont(px, weight);
+
+                for (let i = 1; i < words.length; i++) {
+                    const a = words.slice(0, i).join(" ");
+                    const b = words.slice(i).join(" ");
+                    if (ctx.measureText(a).width <= maxWidth && ctx.measureText(b).width <= maxWidth) {
+                        best = [a, b];
+                        break;
+                    }
+                }
+
+                // als we geen perfecte breuk vinden, forceer met kleinere font
+                while (!best && px > minPx) {
+                    px--;
+                    setFont(px, weight);
+                    for (let i = 1; i < words.length; i++) {
+                        const a = words.slice(0, i).join(" ");
+                        const b = words.slice(i).join(" ");
+                        if (ctx.measureText(a).width <= maxWidth && ctx.measureText(b).width <= maxWidth) {
+                            best = [a, b];
+                            break;
+                        }
+                    }
+                }
+
+                if (!best) {
+                    // ultieme fallback: afkappen
+                    let t = clean;
+                    setFont(minPx, weight);
+                    while (t.length > 0 && ctx.measureText(t + "…").width > maxWidth) t = t.slice(0, -1);
+                    return { lines: [t + "…"], px: minPx };
+                }
+
+                return { lines: best, px };
+            }
+
+            function ellipsize(text, maxWidth, px, weight = "normal") {
+                const t = (text || "").trim();
+                setFont(px, weight);
+                if (ctx.measureText(t).width <= maxWidth) return t;
+                let s = t;
+                while (s.length > 0 && ctx.measureText(s + "…").width > maxWidth) s = s.slice(0, -1);
+                return s + "…";
+            }
+
+            // ---------- content ----------
+            const schoolTxt = (school || "").trim();
+            const locatieTxt = (locatie || "").trim();
+            const printerTxt = (printer || "").trim();
+
+            const schoolKey = schoolTxt;
+            const logoSrc =
+                schoolLogos[schoolKey] ||
+                schoolLogos[schoolKey + " "] ||
+                schoolLogos[school] ||
+                "";
+
+            let logoImg = null;
+            if (logoSrc) {
+                try { logoImg = await loadImageWithFallback(logoSrc); } catch { logoImg = null; }
+            }
+
+            let printerImg = null;
+            try { printerImg = await loadImageWithFallback(printerSvg); } catch { printerImg = null; }
+
+            // ---------- app icon container ----------
+            const card = { x: 8, y: 8, w: W - 16, h: H - 16 };
+            const radius = 46;
+
+            // shadow
+            ctx.save();
+            ctx.shadowColor = "rgba(0,0,0,0.18)";
+            ctx.shadowBlur = 18;
+            ctx.shadowOffsetX = 0;
+            ctx.shadowOffsetY = 10;
+            roundRectPath(card.x, card.y, card.w, card.h, radius);
+            ctx.fillStyle = "#fff";
+            ctx.fill();
+            ctx.restore();
+
+            // clip to rounded rect
+            ctx.save();
+            roundRectPath(card.x, card.y, card.w, card.h, radius);
+            ctx.clip();
+
+            // background gradient
+            const grad = ctx.createLinearGradient(card.x, card.y, card.x, card.y + card.h);
+            grad.addColorStop(0, "#ffffff");
+            grad.addColorStop(1, "#f4f6f9");
+            ctx.fillStyle = grad;
+            ctx.fillRect(card.x, card.y, card.w, card.h);
+
+            // inner border
+            ctx.strokeStyle = "rgba(0,0,0,0.06)";
+            roundRectPath(card.x + 0.5, card.y + 0.5, card.w - 1, card.h - 1, radius);
+            ctx.stroke();
+
+            // ---------- layout zones (strikt) ----------
+            const innerPad = 14;
+            const inner = { x: card.x + innerPad, y: card.y + innerPad, w: card.w - innerPad * 2, h: card.h - innerPad * 2 };
+
+            const topZoneH = 132;          // logo zone
+            const textZoneY = inner.y + topZoneH + 6;
+            const textZoneH = inner.h - topZoneH - 6;
+
+            const maxTextWidth = inner.w;
+
+            // ---------- draw logo (smaller, centered) ----------
+            const logoArea = { x: inner.x, y: inner.y + 6, w: inner.w, h: topZoneH - 10 };
+
+            if (logoImg) {
+                // contain, but a bit smaller than full zone
+                const r = Math.min((logoArea.w * 0.78) / logoImg.width, (logoArea.h * 0.78) / logoImg.height);
+                const lw = logoImg.width * r;
+                const lh = logoImg.height * r;
+                const lx = logoArea.x + (logoArea.w - lw) / 2;
+                const ly = logoArea.y + (logoArea.h - lh) / 2;
+                ctx.drawImage(logoImg, lx, ly, lw, lh);
+            } else {
+                ctx.fillStyle = "rgba(0,0,0,0.05)";
+                ctx.fillRect(logoArea.x, logoArea.y, logoArea.w, logoArea.h);
+            }
+
+            // ---------- printer badge over logo (top-right) ----------
+            if (printerImg) {
+                const iconSize = 54;
+                const iconX = card.x + card.w - innerPad - iconSize - 2;
+                const iconY = card.y + innerPad + 2;
+
+                ctx.fillStyle = "rgba(255,255,255,0.92)";
+                ctx.beginPath();
+                ctx.arc(iconX + iconSize / 2, iconY + iconSize / 2, iconSize / 2 + 7, 0, Math.PI * 2);
+                ctx.fill();
+
+                ctx.strokeStyle = "rgba(0,0,0,0.08)";
+                ctx.lineWidth = 1;
+                ctx.stroke();
+
+                ctx.drawImage(printerImg, iconX, iconY, iconSize, iconSize);
+            }
+
+            // ---------- text block (always fits) ----------
+            ctx.textAlign = "center";
+            ctx.fillStyle = "#111";
+
+            const lineGap = 18;
+            let y = textZoneY + 18;
+
+            // School: 1–2 lines wrap
+            const schoolLine = schoolTxt || "Selecteer school";
+            const schoolWrap = wrapTwoLines(schoolLine, maxTextWidth, 22, 13, "bold");
+            setFont(schoolWrap.px, "bold");
+
+            if (schoolWrap.lines.length === 2) {
+                ctx.fillText(schoolWrap.lines[0], card.x + card.w / 2, y);
+                y += lineGap;
+                ctx.fillText(schoolWrap.lines[1], card.x + card.w / 2, y);
+                y += lineGap - 2;
+            } else {
+                ctx.fillText(schoolWrap.lines[0], card.x + card.w / 2, y);
+                y += lineGap;
+            }
+
+            // Locatie: smaller, ellipsis if needed
+            ctx.fillStyle = "#333";
+            const locLine = locatieTxt || "Selecteer locatie";
+            const locText = ellipsize(locLine, maxTextWidth, 14, "normal");
+            setFont(14, "normal");
+            ctx.fillText(locText, card.x + card.w / 2, y);
+            y += lineGap;
+
+            // Printer: smallest, ellipsis if needed (and only if selected)
+            if (printerTxt) {
+                ctx.fillStyle = "#666";
+                const prnLine = `Printer: ${printerTxt}`;
+                const prnText = ellipsize(prnLine, maxTextWidth, 12, "normal");
+                setFont(12, "normal");
+                ctx.fillText(prnText, card.x + card.w / 2, y);
+            }
+
+            ctx.restore(); // end clip
+
+            // ---------- export (optional) ----------
+            try {
+                const dataUrl = canvas.toDataURL("image/png");
+                const imgEl = document.getElementById("previewImage");
+                if (imgEl) {
+                    imgEl.src = dataUrl;
+                    imgEl.style.display = "block";
+                }
+            } catch {
+                const imgEl = document.getElementById("previewImage");
+                if (imgEl) imgEl.style.display = "none";
+            }
+        }
+
+
+        function updateText() {
+            const printerName = [school, locatie].filter(Boolean).join(" ").trim();
+
+            const install = `powershell.exe -executionpolicy bypass -file Install-Printer.ps1 -PortName "IP_${ip}" -PrinterIP "${ip}" -PrinterName "${printerName}" -DriverName "${driver}" -INFFile "${file}"`;
+            const uninstall = `powershell.exe -executionpolicy bypass -file Remove-Printer.ps1 -PrinterName "${printerName}"`;
+            const regKey = `HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Print\\Printers\\${printerName}`;
+
+            $("#install").text(install);
+            $("#uninstall").text(uninstall);
+
+            $("#reg-path").text(regKey);
+            $("#reg-detection-value").text(printerName);
+
+            $("#driver-date").text(driverDate || "-");
+
+            renderPreviewImage();
+        }
+
+        $(function () {
+            // Init
+            school = getSelectedText("school");
+            locatie = getSelectedText("locatie");
+            printer = getSelectedText("printer");
+            ip = $("#ip").val()?.trim() || ip;
+
+            ({ driver, file, date: driverDate } = resolveDriver(printer));
+            updateText();
+
+            $("#school, #locatie, #printer").on("change", function () {
+                school = getSelectedText("school");
+                locatie = getSelectedText("locatie");
+                printer = getSelectedText("printer");
+
+                ({ driver, file, date: driverDate } = resolveDriver(printer));
+                updateText();
+            });
+
+            $("#ip").on("input change", function () {
+                ip = $("#ip").val()?.trim() || "";
+                updateText();
+            });
+        });
+    </script>
+</head>
+
+<body style="padding: 0; margin: 0; font-family: 'Courier New', Courier, monospace;">
+    <div style="padding: 0 10px;">
+        <h1>Printer driver instellen</h1>
+
+        <label for="school">School........</label>
+        <select id="school">
+            <option>### Selecteer een optie ###</option>
+            <option>KOBA Zuiderkempen</option>
+            <option>De Droomgaard</option>
+            <option>de KaBaZ</option>
+            <option>De Klimmuur</option>
+            <option>De Knipoog</option>
+            <option>De Leeroase</option>
+            <option>De Regenboog</option>
+            <option>De Wegwijzer</option>
+            <option>De Wijngaard </option>
+            <option>Groot-Vorst</option>
+            <option>Meerlaar</option>
+            <option>Sint-Hubertus</option>
+            <option>'t Klavertje</option>
+            <option>Toermalijn</option>
+            <option>Top@punt</option>
+            <option>De Luchtballon</option>
+        </select>
+
+        <br>
+        <label for="locatie">Locatie.......</label>
+        <select id="locatie">
+            <option>### Selecteer een optie ###</option>
+            <option>Personeel</option>
+            <option>Secretatiaat</option>
+            <option>Directie</option>
+        </select>
+
+        <br>
+        <label for="printer">Printer.......</label>
+        <select id="printer">
+            <option>### Selecteer een optie ###</option>
+            <option>Ricoh IMC6010</option>
+            <option>Canon C5850</option>
+            <option>Kyocera TASKalfa 5053ci KX</option>
+            <option>Kyocera TASKalfa 3253ci KX</option>
+        </select>
+
+        <br>
+        <label>Driver datum..</label>
+        <span id="driver-date">-</span>
+
+        <br>
+        <label for="ip">IP Adres......</label>
+        <input type="text" id="ip" value="192.168.0.50">
+
+        <h4>Install commando</h4>
+        <span id="install"></span>
+
+        <h4>Uninstall commando</h4>
+        <span id="uninstall"></span>
+
+        <h4>Intune detection rule (Registry)</h4>
+
+        <table border="1" cellpadding="6" cellspacing="0">
+            <tr>
+                <td><strong>Rule type</strong></td>
+                <td id="reg-rule-type">Registry</td>
+            </tr>
+            <tr>
+                <td><strong>Key path</strong></td>
+                <td id="reg-path"></td>
+            </tr>
+            <tr>
+                <td><strong>Value name</strong></td>
+                <td id="reg-value-name">Name</td>
+            </tr>
+            <tr>
+                <td><strong>Detection method</strong></td>
+                <td id="reg-detection-method">String comparison</td>
+            </tr>
+            <tr>
+                <td><strong>Operator</strong></td>
+                <td id="reg-detection-operator">Equals</td>
+            </tr>
+            <tr>
+                <td><strong>Value</strong></td>
+                <td id="reg-detection-value"></td>
+            </tr>
+            <tr>
+                <td><strong>Associated with 32-bit app</strong></td>
+                <td id="reg-32bit">No</td>
+            </tr>
+        </table>
+
+        <br><br>
+        <a href="">Download intune application</a>
+
+        <h4>Preview afbeelding</h4>
+        <!-- 256x256 zoals je vroeg -->
+        <canvas id="previewCanvas" width="256" height="256" style="border:1px solid #ccc;"></canvas>
+        <br>
+    </div>
+
+    <div style="background-color: grey; color: white; padding: 1px 15px; bottom: 0; width: 100%; text-align: center;">
+        <p>Tom Schelles - Version 1.0.0.0 - 12/12/2025</p>
+    </div>
+</body>
+
+</html>
