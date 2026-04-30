@@ -56,3 +56,7 @@ Bevat de printerdrivers, gestructureerd per fabrikant.
 ## Status
 
 In ontwikkeling.
+
+## Bron
+Install script https://github.com/MSEndpointMgr/Intune/blob/master/Windows%2010/Install-Printer.ps1
+Remove script https://github.com/MSEndpointMgr/Intune/blob/master/Windows%2010/Remove-Printer.ps1
